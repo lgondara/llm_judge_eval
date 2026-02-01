@@ -1,24 +1,5 @@
 # LLM-as-Judge Scoring Strategies for Data Curation
 
-**Research Question**: Which LLM-as-judge scoring strategy produces the best downstream model performance when used for training data curation?
-
-## Motivation
-
-Existing literature splits into two disconnected camps:
-- **Evaluation studies** (JuStRank, RAEE, G-Eval) measure human alignment and inter-judge agreement but never measure downstream utility
-- **Data curation papers** use LLM judges to filter data but don't systematically compare scoring strategies
-
-This project bridges the gap by measuring: `scoring strategy → data curation → downstream model performance`
-
-## Key Hypothesis
-
-The scoring strategy with best human alignment may not produce the best training data. Factors like:
-- Robustness to LLM scoring noise
-- Better identification of edge cases
-- Different sensitivity to quality gradients
-
-...may matter more for downstream utility than human agreement.
-
 ## Scoring Strategies
 
 | Strategy | Type | Scale | Description |
@@ -147,42 +128,6 @@ outputs/my_experiment/
 - **Pass@1**: Primary metric for code benchmarks
 - **Curation curve**: Performance vs retention rate
 - **Optimal retention**: Best performing retention rate per strategy
-
-## Extending
-
-### Adding New Scoring Strategies
-
-Subclass `BaseScoringStrategy` in `src/scoring_strategies.py`:
-
-```python
-class MyScoringStrategy(BaseScoringStrategy):
-    PROMPT_TEMPLATE = "..."
-    
-    @property
-    def strategy_name(self) -> str:
-        return "my_strategy"
-    
-    def get_prompt(self, instruction, response, **kwargs) -> str:
-        return self.PROMPT_TEMPLATE.format(...)
-    
-    def parse_output(self, output: str) -> Tuple[float, Dict]:
-        # Extract score from model output
-        ...
-    
-    def normalize_score(self, raw_score: float) -> float:
-        # Map to 0-1 range
-        ...
-```
-
-### Adding New Benchmarks
-
-Implement in `src/evaluator.py` following the `HumanEvalEvaluator` pattern.
-
-## References
-
-- **JuStRank**: Gera et al. (2024) - System-level judge evaluation
-- **RAEE**: Anchor-based evaluation for improved calibration
-- **RankME**: Novikova et al. (2018) - Human evaluation methodology
 
 ## License
 
