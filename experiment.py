@@ -53,6 +53,17 @@ Response: {response}
 
 Score:"""
 
+ANCHORED_PROMPT = """Compare Response A and Response B. Which is better?
+Reply with only: A++, A+, TIE, B+, or B++
+
+Instruction: {instruction}
+
+Response A (Reference): {anchor}
+
+Response B (Target): {response}
+
+Verdict:"""
+
 # ============================================================================
 # DATA LOADING
 # ============================================================================
@@ -180,6 +191,47 @@ def score_numeric(model, tokenizer, samples):
         scores.append(score / 100)
     
     return scores
+
+
+def score_anchored(model, tokenizer, samples, anchor_response):
+    """Score samples by comparing against a fixed anchor response."""
+    print("\nScoring with ANCHORED strategy...")
+    print(f"  Anchor: {anchor_response[:80]}...")
+    scores = []
+    
+    # Score mapping: A++ (anchor much better) to B++ (target much better)
+    score_map = {
+        "a++": 0.0,   # anchor much better
+        "a+": 0.25,   # anchor slightly better
+        "tie": 0.5,   # equal
+        "b+": 0.75,   # target slightly better
+        "b++": 1.0    # target much better
+    }
+    
+    for sample in tqdm(samples):
+        prompt = ANCHORED_PROMPT.format(
+            instruction=sample["instruction"],
+            response=sample["response"],
+            anchor=anchor_response
+        )
+        output = generate(model, tokenizer, prompt).lower().strip()
+        
+        # Parse verdict
+        score = 0.5  # default to tie
+        for key, val in score_map.items():
+            if key in output:
+                score = val
+                break
+        
+        scores.append(score)
+    
+    return scores
+
+
+def get_anchor_response(model, tokenizer, instruction):
+    """Generate a reference response to use as anchor."""
+    prompt = f"### Instruction:\n{instruction}\n\n### Response:\n"
+    return generate(model, tokenizer, prompt, max_tokens=256)
 
 
 # ============================================================================
@@ -332,14 +384,21 @@ def main(args):
     
     # Score with each strategy
     strategies = {
-        "binary": score_binary,
-        "likert": score_likert,
-        "numeric": score_numeric
+        "binary": lambda m, t, s: score_binary(m, t, s),
+        "likert": lambda m, t, s: score_likert(m, t, s),
+        "numeric": lambda m, t, s: score_numeric(m, t, s),
     }
     
     all_scores = {}
     for name, score_fn in strategies.items():
         all_scores[name] = score_fn(judge_model, judge_tokenizer, train_samples)
+    
+    # Anchored strategy - use a median-quality response as reference
+    # First, get numeric scores to find median sample
+    numeric_scores = all_scores["numeric"]
+    median_idx = sorted(range(len(numeric_scores)), key=lambda i: numeric_scores[i])[len(numeric_scores)//2]
+    anchor_response = train_samples[median_idx]["response"]
+    all_scores["anchored"] = score_anchored(judge_model, judge_tokenizer, train_samples, anchor_response)
     
     # Also add random baseline
     all_scores["random"] = [random.random() for _ in train_samples]
