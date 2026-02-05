@@ -9,8 +9,11 @@ Usage:
 
 import json
 import random
+import re
 import argparse
+import gc
 from tqdm import tqdm
+import numpy as np
 
 import torch
 from datasets import load_dataset
@@ -182,7 +185,6 @@ def score_numeric(model, tokenizer, samples):
         
         # Extract number
         score = 50.0  # default
-        import re
         numbers = re.findall(r'\d+', output)
         if numbers:
             score = min(max(float(numbers[0]), 0), 100)
@@ -232,6 +234,67 @@ def get_anchor_response(model, tokenizer, instruction):
     """Generate a reference response to use as anchor."""
     prompt = f"### Instruction:\n{instruction}\n\n### Response:\n"
     return generate(model, tokenizer, prompt, max_tokens=256)
+
+
+def score_distributional(model, tokenizer, samples):
+    """
+    Distributional scoring: Extract probability distribution over quality levels.
+    
+    Instead of just taking argmax, we:
+    1. Get logits for quality tokens (1-5)
+    2. Compute softmax distribution
+    3. Use expected value as score
+    4. Optionally weight by confidence (1 - entropy)
+    
+    Inspired by "Distributional LLM-as-a-Judge" (Chen et al., NeurIPS 2025)
+    """
+    print("\nScoring with DISTRIBUTIONAL strategy...")
+    scores = []
+    
+    # Tokens for 1-5 scale
+    quality_tokens = ["1", "2", "3", "4", "5"]
+    token_ids = [tokenizer.encode(t, add_special_tokens=False)[0] for t in quality_tokens]
+    
+    prompt_template = """Rate this response quality from 1-5. Output only the number.
+
+Instruction: {instruction}
+
+Response: {response}
+
+Rating:"""
+    
+    for sample in tqdm(samples):
+        prompt = prompt_template.format(**sample)
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            outputs = model(**inputs)
+            # Get logits for the next token position
+            next_token_logits = outputs.logits[0, -1, :]
+            
+            # Extract logits for quality tokens only
+            quality_logits = next_token_logits[token_ids]
+            
+            # Softmax to get distribution
+            probs = torch.softmax(quality_logits, dim=0).cpu().numpy()
+            
+            # Expected value: sum(p_i * i) for i in 1..5
+            values = np.array([1, 2, 3, 4, 5])
+            expected = np.sum(probs * values)
+            
+            # Entropy (uncertainty measure)
+            entropy = -np.sum(probs * np.log(probs + 1e-10))
+            max_entropy = np.log(5)  # uniform distribution
+            confidence = 1 - (entropy / max_entropy)
+            
+            # Score = expected value, normalized to 0-1
+            # Could also weight by confidence: score * confidence
+            score = (expected - 1) / 4
+            
+        scores.append(score)
+    
+    return scores
 
 
 # ============================================================================
@@ -284,9 +347,6 @@ def finetune(samples, output_name, num_epochs=1):
         text = f"### Instruction:\n{s['instruction']}\n\n### Response:\n{s['response']}"
         train_texts.append(text)
     
-    # Simple training loop
-    from torch.utils.data import DataLoader as TorchDataLoader
-    
     model.train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
     
@@ -299,7 +359,7 @@ def finetune(samples, output_name, num_epochs=1):
                 text, 
                 return_tensors="pt", 
                 truncation=True, 
-                max_length=1024,
+                max_length=512,  # reduced from 1024
                 padding=True
             )
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
@@ -320,6 +380,11 @@ def finetune(samples, output_name, num_epochs=1):
     model.save_pretrained(output_name)
     tokenizer.save_pretrained(output_name)
     
+    # Clean up
+    del model, optimizer, tokenizer
+    gc.collect()
+    torch.cuda.empty_cache()
+    
     return output_name
 
 
@@ -327,13 +392,16 @@ def finetune(samples, output_name, num_epochs=1):
 # EVALUATION (simplified - just measures loss on held-out data)
 # ============================================================================
 
-def evaluate(model_path, test_samples):
+def evaluate(model_path, test_samples, base_model_ref=None):
     """Evaluate model on test samples (perplexity)."""
     print(f"\nEvaluating {model_path}...")
     
     from peft import PeftModel
     
     tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer.pad_token = tokenizer.eos_token
+    
+    # Load base model fresh each time to avoid adapter conflicts
     base_model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL,
         torch_dtype=torch.bfloat16,
@@ -344,9 +412,10 @@ def evaluate(model_path, test_samples):
     
     total_loss = 0
     
+    # Process in smaller batches to save memory
     for s in tqdm(test_samples):
         text = f"### Instruction:\n{s['instruction']}\n\n### Response:\n{s['response']}"
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=1024)
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         inputs["labels"] = inputs["input_ids"].clone()
         
@@ -358,6 +427,12 @@ def evaluate(model_path, test_samples):
     perplexity = torch.exp(torch.tensor(avg_loss)).item()
     
     print(f"  Loss: {avg_loss:.4f}, Perplexity: {perplexity:.2f}")
+    
+    # Clean up
+    del model, base_model, tokenizer
+    gc.collect()
+    torch.cuda.empty_cache()
+    
     return {"loss": avg_loss, "perplexity": perplexity}
 
 
@@ -387,6 +462,7 @@ def main(args):
         "binary": lambda m, t, s: score_binary(m, t, s),
         "likert": lambda m, t, s: score_likert(m, t, s),
         "numeric": lambda m, t, s: score_numeric(m, t, s),
+        "distributional": lambda m, t, s: score_distributional(m, t, s),
     }
     
     all_scores = {}
@@ -408,13 +484,14 @@ def main(args):
     print("SCORE STATISTICS")
     print("=" * 60)
     for name, scores in all_scores.items():
-        import numpy as np
-        print(f"{name:10s}: mean={np.mean(scores):.3f}, std={np.std(scores):.3f}, "
+        print(f"{name:15s}: mean={np.mean(scores):.3f}, std={np.std(scores):.3f}, "
               f"unique={len(set(scores))}")
     
     # Free judge model memory
     del judge_model, judge_tokenizer
+    gc.collect()
     torch.cuda.empty_cache()
+    print("Judge model unloaded, memory cleared.")
     
     # Train and evaluate for each strategy
     results = {}
@@ -431,9 +508,17 @@ def main(args):
         model_path = f"model_{strategy_name}_ret{int(args.retention*100)}"
         finetune(selected, model_path, num_epochs=args.epochs)
         
+        # Force cleanup before eval
+        gc.collect()
+        torch.cuda.empty_cache()
+        
         # Evaluate
         metrics = evaluate(model_path, test_samples)
         results[strategy_name] = metrics
+        
+        # Force cleanup after eval
+        gc.collect()
+        torch.cuda.empty_cache()
     
     # Print final comparison
     print("\n" + "=" * 60)
