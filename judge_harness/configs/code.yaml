@@ -1,0 +1,78 @@
+# =============================================================================
+# OPTIONAL Domain pool 2: CODE (run only if week-1 compute finishes early)
+#
+# Strong version of the task-dependence claim: curate a code-specific pool
+# with each strategy, train, evaluate on code benchmarks. Combined with the
+# general pool, the interaction becomes strategy x DOMAIN (causal claim)
+# rather than strategy x evaluation task (associational claim).
+#
+# Reduced grid (2 retentions) to fit the deadline: 5 x 2 x 3 = 30 runs.
+# =============================================================================
+
+experiment:
+  name: "judge_curation_code"
+  output_dir: "outputs/code"
+  seeds: [42, 1337, 2026]
+
+data:
+  # CodeUltraFeedback: coding prompts with multiple rated completions,
+  # same structure as UltraFeedback so src/data.py needs only a loader
+  # variant (completions under "responses"; verify schema on first pull).
+  source: "coseal/CodeUltraFeedback"
+  num_prompts: 3000
+  num_eval_prompts: 200
+  min_response_chars: 20
+  max_response_chars: 8000
+  shuffle_seed: 42
+
+judge:
+  model: "Qwen/Qwen3-8B"
+  backend: "vllm"
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.90
+  max_model_len: 6144
+  temperature: 0.0
+  max_new_tokens: 16
+  enable_thinking: false
+  batch_size: 256
+
+strategies:
+  - name: binary
+  - name: likert_5
+  - name: numeric_100
+  - name: anchored
+    reference_policy: "dataset_median"
+  - name: pairwise_tournament
+    max_comparisons_per_prompt: 6
+
+curation:
+  retention_rates: [0.25, 0.50]      # reduced from 3 to fit deadline
+  baselines: [random, full]
+  selection: "per_prompt_top1_then_global"
+
+training:
+  base_model: "Qwen/Qwen3-4B"
+  method: "lora"
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  num_epochs: 2
+  per_device_batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-4
+  max_seq_len: 2048
+  bf16: true
+
+evaluation:
+  eval_judge_model: "meta-llama/Llama-3.1-8B-Instruct"
+  position_swap: true
+  reference_source: "gpt4_top"
+  # Code-specific judge-free signal: execution-based, immune to judge
+  # circularity entirely -- the strongest possible eval for this domain.
+  optional_benchmarks: ["humaneval", "mbpp"]
+  benchmark_limit: null
+
+analysis:
+  bootstrap_samples: 10000
+  alpha: 0.05

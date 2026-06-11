@@ -1,0 +1,212 @@
+% =============================================================================
+% Introduction and Related Work
+% Working title: "Not All Judges Are Created Equal: Scoring Strategy
+%                 No Universal Scoring Strategy for LLM-Judge Data Curation"
+% =============================================================================
+
+\section{Introduction}
+
+Large language models are now routinely deployed as judges of other models'
+outputs, and one of the highest-stakes uses of these judgments is training
+data curation: scoring candidate instruction--response pairs and retaining
+only those that exceed a quality bar before supervised fine-tuning. The
+practice is ubiquitous---quality filtering with LLM judges underlies
+instruction-tuning corpora~\citep{chen2024alpagasus, cui2023ultrafeedback},
+multilingual pretraining pipelines~\citep{ali2025jql}, and synthetic data
+generation at scale~\citep{sachdeva2024askllm}. Yet a basic design decision
+in every such pipeline has gone almost entirely unexamined: \emph{how} the
+judge is asked to express its judgment. Should it issue a binary
+accept/reject verdict, a 1--5 Likert rating, a fine-grained 0--100 score, or
+a comparative preference against a reference? Practitioners choose among
+these formats by convention or convenience, implicitly assuming the choice
+is innocuous. We show that it is not.
+
+Prior work on judge scoring formats evaluates them against a single
+criterion: agreement with humans or with other judges. Studies of grading
+scales find that human--LLM alignment varies systematically with scale
+granularity~\citep{li2025grading}, that absolute verbalized formats often
+outperform comparative ones for system ranking~\citep{gera2025justrank}, and
+that reference-anchored comparison reduces scoring variance across
+judges~\citep{raee2026}. This evaluation-centric lens, however, measures the
+wrong quantity for the curation setting. When judge scores drive data
+selection, what matters is not whether the scores agree with human raters
+but whether the \emph{selected subset} produces a better model after
+fine-tuning. These two criteria can diverge: recent evidence shows that a
+judge with moderate global correlation to reference labels can capture as
+little as a fifth of the achievable gain in best-of-$n$ selection, because
+selection depends on within-prompt discrimination while agreement metrics
+are dominated by between-prompt variation, and because coarse scoring
+formats produce ties on the majority of comparisons~\citep{landesberg2026}.
+If agreement does not predict inference-time selection quality, there is
+little reason to expect it to predict training-time curation quality, where
+selection errors are compounded through gradient updates rather than
+discarded after a single response.
+
+We therefore pose the question the literature has skipped: \textbf{is
+there a universal best scoring strategy for judge-driven data curation, or
+does the downstream task dictate which strategy wins?} The field's
+implicit assumption is universality---scale choices are made once,
+justified (if at all) by human-alignment studies, and reused across tasks.
+We hypothesize instead that the optimal strategy is
+\emph{task-contingent}, for a mechanistic reason: scoring formats differ
+in where they spend their discriminative capacity. Coarse formats (binary,
+low-granularity Likert) act as high-precision detectors of categorical
+failure but collapse gradations among acceptable responses; fine-grained
+and comparative formats resolve those gradations at the cost of
+calibration noise and verbosity-correlated drift. Tasks whose quality
+structure is near-categorical---code that runs or does not, arithmetic
+that is right or wrong---should therefore favor coarse verdicts, while
+open-ended tasks with graded quality should favor formats that preserve
+ordering among the acceptable. If this is right, no single scale can be
+optimal everywhere, and the universality assumption silently degrades a
+fraction of every curation pipeline built on it.
+
+To test this, we treat the scoring format as the experimental treatment
+and hold everything else fixed---the judge model, the candidate pool, the
+selection budget, the fine-tuning recipe, and the evaluation protocol.
+Five strategies span the design space used in practice: binary
+accept/reject, 5-point Likert, 0--100 numeric, anchored comparison against
+a fixed per-prompt reference, and within-prompt pairwise tournaments
+aggregated with a Bradley--Terry model. For each strategy and retention
+budget we select data by within-strategy percentile rank, fine-tune
+identical base models across multiple seeds, and evaluate each resulting
+model on multiple downstream tasks: judged instruction-following win-rates
+(with an evaluation judge from a different model family than the curation
+judge and position-swapped comparisons), and judge-free benchmarks of
+constraint following and mathematical reasoning. Because ``no universal
+best'' is a claim that cannot rest on a mere absence of a winner, our
+pre-registered analysis requires positive evidence on two fronts:
+significant within-task differences between strategies (Friedman tests
+with Holm-corrected paired bootstraps), and instability of the strategy
+ordering across tasks (top-1 winner agreement, Kendall's~$W$ concordance,
+and a permutation test on the strategy$\times$task interaction).
+
+Beyond the headline result, we analyze \emph{why} the winner moves.
+Coarse formats induce massive score ties that force arbitrary tie-breaking
+at the selection frontier; fine-grained formats spread scores but inject
+calibration noise; comparative formats trade pointwise calibration for
+within-prompt discrimination. We quantify these mechanisms through tie
+probability, effective dynamic range, cross-strategy selection overlap,
+and correlation with external reference annotations, and connect each
+distributional property to the task structure that rewards or punishes it.
+
+Our contributions are threefold. First, we provide, to our knowledge, the
+first controlled comparison of judge scoring strategies evaluated by the
+downstream performance of models fine-tuned on the data they select,
+closing a loop that prior work leaves open at the agreement stage. Second,
+we show that the optimal strategy is not universal: the strategy ranking
+interacts with the downstream task, so scale choices optimized for human
+alignment---or simply inherited by convention---can be actively suboptimal
+for a given curation pipeline. From the mechanism analysis we distill
+practical selection guidance mapping task properties (verifiability,
+quality-distribution shape) to scoring formats. Third, we release an open
+experimental harness\footnote{\url{https://github.com/lgondara/llm_judge_eval}}
+with the pre-registered statistical machinery (paired bootstraps,
+interaction permutation tests, concordance analysis) so the comparison
+can be extended to new judges, domains, and formats at low cost.
+
+% =============================================================================
+
+\section{Related Work}
+
+\paragraph{LLM-as-a-judge and scoring formats.}
+Using LLMs to evaluate model outputs is now standard
+practice~\citep{zheng2023mtbench, liu2023geval}, and a growing literature
+examines how the elicitation format shapes the resulting
+judgments. \citet{li2025grading} collect human and LLM ratings across 0--5,
+0--10, and 0--100 scales on six benchmarks and find that human--LLM
+alignment, measured by intraclass correlation, is highest on the coarsest
+scale. \citet{gera2025justrank} compare scoring realizations---numeric,
+Likert, comparative anchoring, and token probabilities---across 48 judges
+and find that the realization affects system-level ranking quality nearly
+as much as the choice of judge model itself, with verbalized absolute
+formats generally outperforming comparative ones. Reference-anchored
+schemes that convert judgments into win probabilities against a fixed
+anchor reduce per-run standard error and cross-judge
+variance~\citep{raee2026}, echoing earlier findings in human evaluation
+that relative magnitude estimation yields far higher inter-annotator
+reliability than Likert ratings~\citep{novikova2018rankme}. Related
+analyses document scoring biases tied to the format
+itself~\citep{li2025scoringbias} and show that operating on the judge's
+full judgment distribution rather than a point estimate improves
+inference~\citep{wang2025judgmentdist}. In information retrieval,
+\citet{zhuang2024beyond} find that finer-grained relevance labels produce
+better rankings than binary ones. All of these works share an
+evaluation-centric criterion---agreement with humans, inter-judge
+consistency, or ranking fidelity. None measures what happens when the
+scores are consumed by a training pipeline.
+
+\paragraph{Selection quality versus agreement.}
+A small body of recent work questions whether agreement metrics predict
+performance on the tasks judges are actually used
+for. \citet{landesberg2026} show that on best-of-$n$ response selection a
+judge with respectable global correlation recovers only a small fraction
+of the oracle improvement, attributing the gap to weak within-prompt
+discrimination and to ties induced by coarse pointwise scoring, and that
+explicit pairwise judging recovers much of the lost signal.
+\citet{balkir2026adaptive} develop adaptive testing machinery for
+continuous judge scores, implicitly acknowledging that score granularity
+interacts with ranking confidence. We extend this emerging
+``selection $\neq$ agreement'' insight from inference-time reranking to
+training-time data curation, where the consequences of selection error are
+amplified: a misranked response is not merely served once but trained on,
+shifting model parameters for every future query.
+
+\paragraph{LLM-based data selection for instruction tuning.}
+A parallel literature uses LLM judges to curate fine-tuning data but
+treats the scoring format as fixed. AlpaGasus filters Alpaca with a
+ChatGPT grader on a 0--5 scale and shows that 9k selected examples
+outperform the full 52k~\citep{chen2024alpagasus}. UltraFeedback annotates
+multi-model completions with GPT-4 scores to build preference
+data~\citep{cui2023ultrafeedback}. DS\textsuperscript{2} models the error
+structure of LLM ratings and corrects scores before selection, observing
+that rating errors are prevalent and vary across rater
+models~\citep{pang2025ds2}. Ask-LLM scores pretraining data with
+instruction-tuned raters~\citep{sachdeva2024askllm}, and JQL extends
+judge-based filtering to multilingual pretraining with demonstrated
+downstream gains~\citep{ali2025jql}. Complementary LLM-free selectors rank
+data by perplexity-derived difficulty~\citep{li2024ifd,
+li2024superfiltering} or by diversity-aware
+objectives~\citep{bukharin2024diversity}. Across this entire line of work
+the judge's elicitation format is an unexamined constant: each paper
+adopts one scale and compares against \emph{other selectors}, not against
+the same selector under \emph{other scales}. The single closest precedent
+we are aware of is an ablation showing four-bin relevance labels beat
+two-bin labels for reranking in IR~\citep{zhuang2024beyond}---a result
+confined to retrieval and never propagated through model training.
+
+\paragraph{Positioning.}
+Our work sits at the intersection of these threads and fills the gap
+between them. From the scoring-format literature we inherit the treatment
+variable; from the data-selection literature we inherit the task; from the
+selection-versus-agreement literature we inherit the warning that the
+standard evaluation criterion may be misleading. The resulting study is,
+to our knowledge, the first to causally connect the choice of judge
+scoring strategy to the quality of the fine-tuned model it ultimately
+produces---and the first to test whether any such choice can be universal.
+Agreement metrics are demoted from evaluation criterion to explanatory
+mechanism, and the universality assumption embedded in every fixed-scale
+curation pipeline is itself placed under test.
+
+% =============================================================================
+% BibTeX stubs (verify/complete before submission)
+% =============================================================================
+% @article{li2025grading,        title={Grading Scale Impact on LLM-as-a-Judge: Human-LLM Alignment Is Highest on 0-5 Grading Scale}, author={Li, Weiyue and others}, journal={arXiv:2601.03444}, year={2026}}
+% @inproceedings{gera2025justrank, title={JuStRank: Benchmarking LLM Judges for System Ranking}, author={Gera, Ariel and others}, booktitle={ACL}, year={2025}}
+% @misc{raee2026,                title={Reference-Anchored Elo Estimation}, note={OpenReview}, year={2026}}  % confirm publication status
+% @inproceedings{novikova2018rankme, title={RankME: Reliable Human Ratings for Natural Language Generation}, author={Novikova, Jekaterina and Du{\v{s}}ek, Ond{\v{r}}ej and Rieser, Verena}, booktitle={NAACL}, year={2018}}
+% @article{landesberg2026,       title={When LLM Judge Scores Look Good but Best-of-N Decisions Fail}, author={Landesberg, Eddie}, journal={arXiv:2603.12520}, year={2026}}
+% @article{balkir2026adaptive,   title={Confident Rankings with Fewer Items: Adaptive LLM Evaluation with Continuous Scores}, author={Balk{\i}r, Esma and others}, journal={arXiv:2601.13885}, year={2026}}
+% @inproceedings{chen2024alpagasus, title={AlpaGasus: Training a Better Alpaca with Fewer Data}, author={Chen, Lichang and others}, booktitle={ICLR}, year={2024}}
+% @article{cui2023ultrafeedback, title={UltraFeedback: Boosting Language Models with High-Quality Feedback}, author={Cui, Ganqu and others}, journal={arXiv:2310.01377}, year={2023}}
+% @inproceedings{pang2025ds2,    title={Improving Data Efficiency via Curating LLM-Driven Rating Systems}, booktitle={ICLR}, year={2025}}
+% @article{sachdeva2024askllm,   title={How to Train Data-Efficient LLMs}, author={Sachdeva, Noveen and others}, journal={arXiv:2402.09668}, year={2024}}
+% @article{ali2025jql,           title={JQL: Judging Quality across Languages}, year={2025}}  % verify
+% @inproceedings{zheng2023mtbench, title={Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena}, author={Zheng, Lianmin and others}, booktitle={NeurIPS}, year={2023}}
+% @inproceedings{liu2023geval,   title={G-Eval: NLG Evaluation using GPT-4 with Better Human Alignment}, author={Liu, Yang and others}, booktitle={EMNLP}, year={2023}}
+% @article{li2025scoringbias,    title={Evaluating Scoring Bias in LLM-as-a-Judge}, author={Li, Qingquan and others}, journal={arXiv:2506.22316}, year={2025}}
+% @inproceedings{wang2025judgmentdist, title={Improving LLM-as-a-Judge Inference with the Judgment Distribution}, journal={arXiv:2503.03064}, year={2025}}
+% @article{zhuang2024beyond,     title={Beyond Yes and No: Improving Zero-Shot LLM Rankers via Scoring Fine-Grained Relevance Labels}, author={Zhuang, Honglei and others}, year={2024}}
+% @inproceedings{li2024ifd,      title={From Quantity to Quality: Boosting LLM Performance with Self-Guided Data Selection}, booktitle={NAACL}, year={2024}}
+% @article{li2024superfiltering, title={Superfiltering: Weak-to-Strong Data Filtering for Fast Instruction-Tuning}, year={2024}}
+% @article{bukharin2024diversity, title={Data Diversity Matters for Robust Instruction Tuning}, year={2024}}

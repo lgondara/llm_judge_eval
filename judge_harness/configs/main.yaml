@@ -1,0 +1,80 @@
+# =============================================================================
+# Scoring Strategies for LLM-Judge Data Curation — Main Experiment Config
+#
+# Design: 5 strategies x 3 retention rates x 3 seeds + baselines
+#   Treatment variable: scoring strategy (everything else held fixed)
+#   Outcome: downstream judged win-rate of LoRA-finetuned model
+# =============================================================================
+
+experiment:
+  name: "judge_curation_main"
+  output_dir: "outputs/main"
+  seeds: [42, 1337, 2026]          # fine-tuning replicates per cell
+
+data:
+  # UltraFeedback: 4 completions/prompt with GPT-4 overall_score annotations.
+  # Gives natural quality variance + an external reference ranking.
+  source: "openbmb/UltraFeedback"
+  num_prompts: 4000                # -> ~16k (instruction, response) candidates
+  num_eval_prompts: 300            # held-out prompts for downstream eval
+  min_response_chars: 20
+  max_response_chars: 6000
+  shuffle_seed: 42
+
+judge:
+  model: "Qwen/Qwen3-8B"
+  backend: "vllm"                  # vllm | hf
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.90
+  max_model_len: 4096
+  temperature: 0.0
+  max_new_tokens: 16               # verdict-only outputs; raise if using CoT
+  enable_thinking: false
+  batch_size: 256
+
+strategies:
+  - name: binary
+  - name: likert_5
+  - name: numeric_100
+  - name: anchored                 # pairwise vs. fixed reference response
+    reference_policy: "dataset_median"   # median-quality response per prompt
+  - name: pairwise_tournament      # within-prompt round robin -> Bradley-Terry
+    max_comparisons_per_prompt: 6  # C(4,2) for UltraFeedback's 4 responses
+
+curation:
+  retention_rates: [0.10, 0.25, 0.50]
+  baselines:
+    - random                       # expected value of no curation signal
+    - length                       # longest-response heuristic (verbosity check)
+    - full                         # 100% retention, no curation
+  selection: "per_prompt_top1_then_global"
+  # per_prompt_top1_then_global: first keep best-scored response per prompt,
+  # then rank prompts globally by that score and apply retention cut.
+  # Avoids conflating response selection with prompt selection.
+
+training:
+  base_model: "Qwen/Qwen3-4B"
+  method: "lora"
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  num_epochs: 2
+  per_device_batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-4
+  max_seq_len: 2048
+  bf16: true
+
+evaluation:
+  # Judged win-rate vs fixed reference completions on held-out prompts.
+  # CRITICAL: eval judge from a DIFFERENT model family than curation judge.
+  eval_judge_model: "meta-llama/Llama-3.1-8B-Instruct"
+  position_swap: true              # evaluate (A,B) and (B,A); count consistent wins
+  reference_source: "gpt4_top"     # highest GPT-4-rated response per eval prompt
+  optional_benchmarks: ["ifeval", "gsm8k"]   # judge-free tasks via lm-eval-harness
+  benchmark_limit: 500                        # instances per benchmark
+
+analysis:
+  bootstrap_samples: 10000
+  alpha: 0.05
