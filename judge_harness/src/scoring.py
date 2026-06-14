@@ -18,12 +18,35 @@ from __future__ import annotations
 
 import itertools
 import math
+import os
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+
+
+def _set_blackwell_safe_env() -> None:
+    """Work around FlashInfer JIT failures on Blackwell (sm_120) GPUs.
+
+    On RTX 50xx / RTX PRO 6000 / B-series cards the default FlashInfer
+    sampler tries to JIT-compile a top-k/top-p kernel and aborts with a
+    misleading "FlashInfer requires GPUs with sm75 or higher" error.
+    Our judge runs greedy (temperature=0), so the FlashInfer sampling path
+    is never needed -- disabling it falls back to the PyTorch-native path
+    at zero quality cost. Only sets a variable if the user has not already
+    set it, so explicit overrides win. Must run before `import vllm`.
+    """
+    defaults = {
+        "VLLM_USE_FLASHINFER_SAMPLER": "0",      # the actual fix
+        "VLLM_USE_TRTLLM_ATTENTION": "0",        # avoid other FI JIT paths
+        "VLLM_USE_TRTLLM_DECODE_ATTENTION": "0",
+        "VLLM_USE_TRTLLM_CONTEXT_ATTENTION": "0",
+    }
+    for k, v in defaults.items():
+        os.environ.setdefault(k, v)
+
 
 # ----------------------------------------------------------------------------
 # Judge backend (vLLM preferred; HF fallback for debugging)
@@ -43,6 +66,7 @@ class JudgeBackend:
         self.enable_thinking = enable_thinking
 
         if backend == "vllm":
+            _set_blackwell_safe_env()
             from vllm import LLM, SamplingParams
             self.llm = LLM(model=model_name, max_model_len=max_model_len,
                            tensor_parallel_size=tensor_parallel_size,

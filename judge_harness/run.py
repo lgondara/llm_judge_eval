@@ -74,10 +74,8 @@ def stage_score(cfg):
     o = out_dir(cfg)
     cands = load_candidates(o / "candidates.jsonl")
     j = cfg["judge"]
-    backend = JudgeBackend(j["model"], j["backend"], j["max_new_tokens"],
-                           j["max_model_len"], j["tensor_parallel_size"],
-                           j["gpu_memory_utilization"],
-                           j.get("enable_thinking", False))
+    from src.api_backend import build_backend
+    backend = build_backend(j)
     diagnostics = {}
     for s in cfg["strategies"]:
         cls = STRATEGIES[s["name"]]
@@ -165,11 +163,29 @@ def stage_generate(cfg, cell: str | None):
 
 def stage_judge_eval(cfg):
     from src.evaluation import judged_win_rate, save_eval
+    from src.api_backend import build_backend
     o = out_dir(cfg)
     eval_prompts = json.loads((o / "eval_prompts.json").read_text())
     e = cfg["evaluation"]
-    backend = JudgeBackend(e["eval_judge_model"], cfg["judge"]["backend"],
-                           max_new_tokens=16)
+    # Build an eval-judge config: defaults to the same backend type as the
+    # curation judge, but model/base_url/key can be set independently so the
+    # eval judge can be a different family (anti-circularity).
+    ej = {
+        "backend": e.get("eval_backend", cfg["judge"].get("backend", "vllm")),
+        "model": e["eval_judge_model"],
+        "max_new_tokens": 16,
+        "enable_thinking": False,
+        "base_url": e.get("eval_base_url", cfg["judge"].get("base_url", "")),
+        "api_key_env": e.get("eval_api_key_env",
+                             cfg["judge"].get("api_key_env", "DEEPSEEK_API_KEY")),
+        "max_concurrency": e.get("max_concurrency", 16),
+        "cache_dir": str(o / "_api_cache_eval"),
+        # vLLM fields (ignored by the API backend)
+        "max_model_len": cfg["judge"].get("max_model_len", 4096),
+        "tensor_parallel_size": cfg["judge"].get("tensor_parallel_size", 1),
+        "gpu_memory_utilization": cfg["judge"].get("gpu_memory_utilization", 0.9),
+    }
+    backend = build_backend(ej)
     for c in all_cells(cfg):
         run_dir = o / "runs" / c
         rp, ep = run_dir / "responses.json", run_dir / "eval.json"

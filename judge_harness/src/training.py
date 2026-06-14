@@ -62,11 +62,18 @@ def train_cell(candidate_index: dict, sample_ids: list[str], cfg: dict,
         gradient_accumulation_steps=cfg["gradient_accumulation_steps"],
         learning_rate=cfg["learning_rate"],
         bf16=cfg.get("bf16", True),
+        # Memory-saving knobs (default on; matter on 24GB cards).
+        gradient_checkpointing=cfg.get("gradient_checkpointing", True),
+        optim=cfg.get("optim", "adamw_torch"),
         logging_steps=20,
         save_strategy="no",
         report_to=[],
         seed=seed,
     )
+    if cfg.get("gradient_checkpointing", True):
+        # Required so checkpointing produces grads through a frozen base model.
+        model.config.use_cache = False
+        model.enable_input_require_grads()
     trainer = Trainer(model=model, args=args, train_dataset=ds,
                       data_collator=DataCollatorForLanguageModeling(tok, mlm=False))
     trainer.train()

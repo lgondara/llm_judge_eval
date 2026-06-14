@@ -1,0 +1,64 @@
+experiment:
+  name: "pilot"
+  output_dir: "outputs/pilot"
+  seeds: [42, 1337]                  # 2 seeds — directionality, not final CIs
+
+data:
+  source: "openbmb/UltraFeedback"
+  num_prompts: 1200                  # ~4800 candidates: real selection pressure
+  num_eval_prompts: 150              # the lever that controls your error bars
+  min_response_chars: 20
+  max_response_chars: 6000
+  shuffle_seed: 42
+
+judge:
+  model: "Qwen/Qwen3-8B"
+  backend: "vllm"
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.95
+  max_model_len: 3072
+  temperature: 0.0
+  max_new_tokens: 32                 # bumped, in case of think-preamble
+  enable_thinking: false
+  batch_size: 256
+
+strategies:
+  - name: binary
+  - name: likert_5
+  - name: numeric_100
+  - name: anchored
+    reference_policy: "dataset_median"
+  - name: pairwise_tournament
+    max_comparisons_per_prompt: 6
+
+curation:
+  retention_rates: [0.25]            # ONE rate — collapse this axis for the pilot
+  baselines: [random, full]
+  selection: "per_prompt_top1_then_global"
+
+training:
+  base_model: "Qwen/Qwen3-4B"
+  method: "lora"
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  num_epochs: 2
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 8     # effective batch = 8, unchanged
+  learning_rate: 2.0e-4
+  max_seq_len: 1024                  # was 2048; halves activation memory
+  bf16: true
+  gradient_checkpointing: true       # ~30-40% activation savings
+  optim: "paged_adamw_8bit"          # halves optimizer state, CPU-spills under pressure
+
+evaluation:
+  eval_judge_model: "meta-llama/Llama-3.1-8B-Instruct"
+  position_swap: true
+  reference_source: "gpt4_top"
+  optional_benchmarks: ["gsm8k"]     # ONE verifiable task vs the judged task = the interaction
+  benchmark_limit: 200
+
+analysis:
+  bootstrap_samples: 10000
+  alpha: 0.05

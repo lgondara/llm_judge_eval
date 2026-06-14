@@ -8,3 +8,6 @@ pandas
 scipy
 pyyaml
 tqdm
+openai>=1.40
+nest_asyncio
+bitsandbytes
